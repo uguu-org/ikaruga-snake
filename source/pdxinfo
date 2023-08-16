@@ -1,0 +1,7 @@
+name=Ikaruga Snake
+author=uguu.org
+description=Snake with Ikaruga scoring rules
+bundleID=org.uguu.ikaruga-snake
+version=0.1
+buildNumber=1
+imagePath=launcher/
