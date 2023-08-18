@@ -17,6 +17,7 @@
 targets = \
 	title.png \
 	game_over.png \
+	you_win.png \
 	launch_image.png \
 	tiles-table-32-32.png \
 	numbers-table-10-12.png \
@@ -56,7 +57,19 @@ t_game_over_alpha.ppm: t_game_over.png
 	pngtopnm -alpha $< > $@
 
 t_game_over.png: images.png
-	convert $< -crop 303x47+1184+224 $@
+	convert $< -crop 305x49+1536+416 $@
+
+you_win.png: t_you_win_pixels.ppm t_you_win_alpha.ppm
+	pnmtopng -compression 9 -alpha=t_you_win_alpha.ppm $< > $@
+
+t_you_win_pixels.ppm: t_you_win.png
+	pngtopnm $< | ppmtoppm > $@
+
+t_you_win_alpha.ppm: t_you_win.png
+	pngtopnm -alpha $< > $@
+
+t_you_win.png: images.png
+	convert $< -crop 229x48+1536+480 $@
 
 tiles-table-32-32.png: t_tiles_pixels.ppm t_tiles_alpha.ppm
 	pnmtopng -compression 9 -alpha=t_tiles_alpha.ppm $< > $@

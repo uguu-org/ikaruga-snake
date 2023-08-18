@@ -72,6 +72,7 @@ local GAME_INIT <const> = 0
 local GAME_TITLE <const> = 1
 local GAME_RUNNING <const> = 2
 local GAME_OVER <const> = 3
+local GAME_WON <const> = 4
 local game_state = GAME_INIT
 
 -- Game speed.  This is how much snake_frame is incremented at each frame.
@@ -80,6 +81,9 @@ local MAX_SPEED <const> = 8
 local MEDIUM_SPEED <const> = 4
 local MIN_SPEED <const> = 1
 local game_speed = MAX_SPEED
+
+-- Number of frames elapsed in GAME_RUNNING state.
+local game_time = 0
 
 -- Grid cells.
 local GRID_W <const> = 12
@@ -281,6 +285,7 @@ local random_positions_index = GRID_W * GRID_H + 2
 -- all the way to the end.
 local fruit_serial = 0
 local fruit_endgame = false
+local fruits_remaining = 0
 
 -- Timers for animating transitional fruits.
 local START_FRUIT_TIMER <const> = 4
@@ -530,6 +535,18 @@ ui_game_over_sprite:setCenter(0, 0)
 ui_game_over_sprite:moveTo(GAME_OVER_X, GAME_OVER_Y)
 ui_game_over_sprite:setVisible(false)
 
+local ui_you_win_image = gfx.image.new("you_win")
+assert(ui_you_win_image)
+local YOU_WIN_W <const>, YOU_WIN_H <const> = ui_you_win_image:getSize()
+local YOU_WIN_X <const> = 200 - YOU_WIN_W // 2
+local YOU_WIN_Y <const> = 90 - YOU_WIN_H // 2
+local ui_you_win_sprite = gfx.sprite.new(ui_you_win_image)
+ui_you_win_sprite:setZIndex(Z_TITLE)
+ui_you_win_sprite:addSprite()
+ui_you_win_sprite:setCenter(0, 0)
+ui_you_win_sprite:moveTo(YOU_WIN_X, YOU_WIN_Y)
+ui_you_win_sprite:setVisible(false)
+
 -- There is no need to draw border as sprites since they are covered
 -- by background color.
 gfx.setBackgroundColor(gfx.kColorBlack)
@@ -574,6 +591,7 @@ local function reset()
 	snake_current_chain_length = 0
 
 	snake_frame = 0
+	game_time = 0
 
 	-- Start snake head in invisible state.
 	ui_snake_head_sprite:setImage(ui_tile_images:getImage(blank_tile))
@@ -598,6 +616,7 @@ local function reset()
 	fruit_grow_timer = 0
 	fruit_eat_timer = 0
 	fruit_transition_timer = 0
+	fruits_remaining = 0
 
 	-- Reset status bar.
 	for x = 1, 3 do
@@ -1061,6 +1080,87 @@ local function spawn_fruit()
 	next_fruit_color |= GRID_FRUIT_GROW_FLAGS
 	grid[y][x] = next_fruit_color
 	fruit_grow_timer = START_FRUIT_TIMER
+	fruits_remaining += 1
+end
+
+-- Check if a particular cell contains obstacle or fruit, returns true if so.
+-- This is only used by autopilot(), which is only called when there are no
+-- fruits left on the grid.
+local function has_obstacle(x, y)
+	if x < 1 or x > GRID_W or y < 1 or y > GRID_H then
+		return true
+	end
+	local cell = grid[y][x]
+	if cell and cell ~= GRID_EMPTY then
+		-- Tail end of the snake doesn't count as an obstacle, because
+		-- visually there is nothing there.
+		local p = (snake_head - snake_length) & SNAKE_BUFFER_MASK
+		if snake[p] and snake[p][1] == x and snake[p][2] == y then
+			return false
+		end
+		return true
+	end
+	return false
+end
+
+-- Change snake direction to avoid obstacles.
+--
+-- Note that this is not a general autopilot, it only works in two scenarios:
+-- 1. On title screen, where snake is guaranteed to be crawling along the
+--    edges.  The behavior here will cause it to follow the edge.
+-- 2. When game has been won, and there is exactly one free spot available,
+--    which is the tail of the snake.
+--
+-- In most other situations, this function will do the wrong thing because
+-- it doesn't do any planning ahead.  The best case is the snake running into
+-- itself and cause some graphical glitches, the worst case is the snake
+-- running out of bounds and we will try to access a part of grid[][] that
+-- isn't populated.
+local function autopilot()
+	-- Only do something if there is an obstacle ahead.
+	if not has_obstacle(snake_x, snake_y) then
+		return
+	end
+
+	-- Turn counter-clockwise if there is no obstacle there, otherwise
+	-- turn clockwise.
+	if snake_direction == INPUT_RIGHT then
+		snake_x -= 1
+		if not has_obstacle(snake_x, snake_y - 1) then
+			snake_y -= 1
+			snake_direction = tiles.DIRECTION_RIGHT_UP
+		else
+			snake_y += 1
+			snake_direction = tiles.DIRECTION_RIGHT_DOWN
+		end
+	elseif snake_direction == INPUT_LEFT then
+		snake_x += 1
+		if not has_obstacle(snake_x, snake_y + 1) then
+			snake_y += 1
+			snake_direction = tiles.DIRECTION_LEFT_DOWN
+		else
+			snake_y -= 1
+			snake_direction = tiles.DIRECTION_LEFT_UP
+		end
+	elseif snake_direction == INPUT_UP then
+		snake_y += 1
+		if not has_obstacle(snake_x - 1, snake_y) then
+			snake_x -= 1
+			snake_direction = tiles.DIRECTION_UP_LEFT
+		else
+			snake_x += 1
+			snake_direction = tiles.DIRECTION_UP_RIGHT
+		end
+	else  -- INPUT_DOWN
+		snake_y -= 1
+		if not has_obstacle(snake_x + 1, snake_y) then
+			snake_x += 1
+			snake_direction = tiles.DIRECTION_DOWN_RIGHT
+		else
+			snake_x -= 1
+			snake_direction = tiles.DIRECTION_DOWN_LEFT
+		end
+	end
 end
 
 -- Setup for GAME_RUNNING state.
@@ -1086,6 +1186,7 @@ local function enter_running_state()
 		if y and (y < 3 or y > 5) then
 			grid[y][x] = GRID_FRUIT_GROW_FLAGS | next_fruit_color
 			fruit_serial += 1
+			fruits_remaining += 1
 		end
 	end
 
@@ -1093,6 +1194,7 @@ local function enter_running_state()
 	-- by snake.
 	local last_fruit_color = (fruit_serial % 6) // 3 + 1
 	fruit_serial += 1
+	fruits_remaining += 1
 	grid[4][GRID_W - 1] = GRID_FRUIT_GROW_FLAGS | last_fruit_color
 
 	-- Set timer to make fruits grow.
@@ -1102,22 +1204,22 @@ local function enter_running_state()
 	draw_number(34, snake_score)
 end
 
--- Setup for GAME_OVER state.
+-- Setup for GAME_OVER state on death.
 --
 -- Only reachable upon colliding with something.
 local function enter_game_over()
+	-- Save high score if we made an improvement.
+	if snake_score > save_state.hi_score then
+		save_state.hi_score = snake_score
+		playdate.datastore.write(save_state)
+	end
+
 	-- Redraw snake with dead expression.
 	redraw_snake()
 	local d = (TURN_DIRECTION[snake_direction] - 1) // 3 + 1
 	ui_snake_head_sprite:setImage(ui_tile_images:getImage(tiles.dead[snake_color][d]))
 	gfx.sprite.update()
 	coroutine.yield()
-
-	-- Save high score if we made an improvement.
-	if snake_score > save_state.hi_score then
-		save_state.hi_score = snake_score
-		playdate.datastore.write(save_state)
-	end
 
 	-- Shake the screen for a few frames.
 	--
@@ -1161,6 +1263,54 @@ local function enter_game_over()
 	clear_buffered_inputs = true
 end
 
+-- Setup for GAME_OVER state on victory.
+--
+-- Only reachable when grid is full.
+local function enter_game_won()
+	-- Save high score if we made an improvement.
+	if snake_score > save_state.hi_score then
+		save_state.hi_score = snake_score
+		playdate.datastore.write(save_state)
+	end
+
+	-- Wait for the last fruit to be completely eaten.
+	while fruit_eat_timer > 0 do
+		gfx.sprite.update()
+		coroutine.yield()
+
+		update_snake()
+		draw_snake()
+		draw_fruits()
+		draw_max_chain()
+	end
+	draw_fruits()
+
+	-- Erase chain dots.  This is so that if we end on a max chain, we are
+	-- not obligated to continue blinking.
+	for x = 1, 3 do
+		ui_dots:setTileAtPosition(x, 1, DOT_BLANK)
+	end
+
+	-- Make high score visible.
+	draw_high_score()
+
+	-- Fade in victory text.
+	for i = 1, 32 do
+		adjust_speed()
+		update_snake()
+		draw_snake()
+		autopilot()
+
+		gfx.sprite.update()
+		ui_you_win_image:drawFaded(YOU_WIN_X, YOU_WIN_Y, i / 32, gfx.image.kDitherTypeBayer8x8)
+		coroutine.yield()
+	end
+	ui_you_win_sprite:setVisible(true)
+
+	game_state = GAME_WON
+	clear_buffered_inputs = true
+end
+
 -- Fetch the next buffered input command, or nil if there is none.
 local function get_next_input()
 	if input_read_index == input_write_index then
@@ -1201,6 +1351,13 @@ local function handle_direction_input(command)
 	-- always silently ignored.
 	if command == OPPOSITE_DIRECTION[snake_direction] then
 		return true
+	end
+
+	-- Don't accept direction changes until snake length is at least one.
+	-- This avoids instant-death near the beginning while snake is still
+	-- crawling in from beyond the left edge of the screen.
+	if snake_length < 1 then
+		return false
 	end
 
 	-- Remaining inputs are intent to turn.  We will make the turn now if we
@@ -1283,6 +1440,18 @@ end
 -- This is called when player is about to die, but visually they have not
 -- fully entered the next cell yet.  We will continue to animate the snake to
 -- make the visual transition to death smoother.
+--
+-- If player desperately tried to turn away from death here, they can do
+-- nothing but helplessly watch the snake die in the final few frames.
+-- One thought would be to handle extra button presses here so that any last
+-- turn commands would be honored, but this is complicated because yielding
+-- from playdate.update() is not the same as returning from it in the sense
+-- that button callbacks are *not* called after a yield.  In order to receive
+-- button presses inside this function, we will need to make it a separate
+-- game_state so that we can return from playdate.update().  This is a mess.
+--
+-- Naturally, it's much easier if players just tell us where they want to
+-- go early, while the snake head has not yet advanced to the next cell.
 local function wait_until_just_before_next_cell()
 	-- Draw the last frame before entering waiting loop.
 	gfx.sprite.update()
@@ -1378,8 +1547,15 @@ local function update_game_menu_image()
 		gfx.drawText(snake_chain, 4, 70)
 		gfx.drawText("*Max Chain*", 4, 92)
 		gfx.drawText(snake_max_chain, 4, 114)
-		gfx.drawText("*High score*", 4, 180)
-		gfx.drawText(save_state.hi_score, 4, 202)
+		gfx.drawText("*Game time*", 4, 136)
+		local millis = math.floor((game_time / 30) * 1000)
+		local minutes = millis // (60 * 1000)
+		local seconds = (millis % (60 * 1000)) // 1000
+		millis %= 1000
+		gfx.drawText(string.format("%d:%02d.%03d", minutes, seconds, millis), 4, 158)
+
+		gfx.drawText("*High score*", 4, 196)
+		gfx.drawText(save_state.hi_score, 4, 218)
 		gfx.popContext()
 	end
 end
@@ -1413,6 +1589,8 @@ end
 
 -- Game loop for interactive state.
 local function game_running()
+	game_time += 1
+
 	-- Animate snake.
 	update_snake()
 	draw_snake()
@@ -1462,16 +1640,29 @@ local function game_running()
 				fruit_eat_timer = START_FRUIT_TIMER
 				update_score(snake_color)
 				spawn_fruit()
+
+				fruits_remaining -= 1
+				if fruits_remaining <= 0 then
+					enter_game_won()
+				end
 			else
 				-- Colliding with a hostile fruit.
 				wait_until_just_before_next_cell()
 				enter_game_over()
-				return
 			end
 		elseif cell < GRID_FRUIT_FLAGS then
 			-- Collision with snake body.  If the cell is exactly at where the
 			-- tail of the snake is, we will pretend the collision didn't
 			-- happen.  This is because visually, there was likely no tail there.
+			--
+			-- Because of this special case, the end of the game will be a world
+			-- where the grid is completely full and we can't spawn any more
+			-- fruits, but there is still cell worth of space left.  In that
+			-- world, players can continue indefinitely by following their own
+			-- tail until they get tired.  To spare players the trouble of
+			-- having to play while there is no fruit left, we would enter
+			-- GAME_WON state in that case, and the game runs in autopilot
+			-- until a button is pressed.
 			local p = (snake_head - snake_length) & SNAKE_BUFFER_MASK
 			if snake[p] and (snake_x ~= snake[p][1] or snake_y ~= snake[p][2]) then
 				wait_until_just_before_next_cell()
@@ -1486,12 +1677,16 @@ local function game_init()
 	reset()
 	ui_title_sprite:setVisible(true)
 	ui_game_over_sprite:setVisible(false)
+	ui_you_win_sprite:setVisible(false)
 
 	-- Draw high score if it's available.
 	draw_high_score()
 
-	-- Initialize snake to start in bottom right corner, going up.
-	snake_x = GRID_W
+	-- Initialize snake to start in bottom left or right corner, going up.
+	snake_x = 1
+	if math.random(2) == 1 then
+		snake_x = GRID_W
+	end
 	snake_y = GRID_H
 	snake_direction = INPUT_UP
 
@@ -1511,27 +1706,8 @@ local function game_title()
 		update_snake()
 		draw_snake()
 
-		if snake_x == 0 then
-			-- At left edge, turn down.
-			snake_x = 1
-			snake_y += 1
-			snake_direction = tiles.DIRECTION_LEFT_DOWN
-		elseif snake_x > GRID_W then
-			-- At right edge, turn up.
-			snake_x = GRID_W
-			snake_y -= 1
-			snake_direction = tiles.DIRECTION_RIGHT_UP
-		elseif snake_y == 0 then
-			-- At top edge, turn left.
-			snake_x -= 1
-			snake_y = 1
-			snake_direction = tiles.DIRECTION_UP_LEFT
-		elseif snake_y > GRID_H then
-			-- At bottom edge, turn right.
-			snake_x += 1
-			snake_y = GRID_H
-			snake_direction = tiles.DIRECTION_DOWN_RIGHT
-		end
+		-- Turn around at corners.
+		autopilot()
 		return
 	end
 
@@ -1560,6 +1736,20 @@ local function game_title()
 	ui_snake_head_sprite:setVisible(true)
 
 	enter_running_state()
+end
+
+-- Game loop for victory screen.
+local function game_won()
+	-- Cut to title screen on button press.
+	if input_write_index ~= input_read_index then
+		game_state = GAME_INIT
+		return
+	end
+
+	-- Animate snake.
+	update_snake()
+	draw_snake()
+	autopilot()
 end
 
 -- Game loop for game over screen.
@@ -1597,6 +1787,8 @@ function playdate.update()
 		game_title()
 	elseif game_state == GAME_TITLE then
 		game_title()
+	elseif game_state == GAME_WON then
+		game_won()
 	else
 		game_over()
 	end
@@ -1647,7 +1839,7 @@ function playdate.crankDocked()
 end
 
 function playdate.gameWillPause()
-	if game_state == GAME_RUNNING or game_state == GAME_OVER then
+	if game_state ~= GAME_TITLE then
 		update_game_menu_image()
 	else
 		update_title_menu_image()
