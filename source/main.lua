@@ -233,6 +233,14 @@ local snake_color = tiles.COLOR_LIGHT
 -- repeating the final animation frame.
 local snake_frame = 0
 
+-- True if snake_frame is no longer updating.
+--
+-- This is set to true when autopilot failed, which can happen if game ends
+-- without forming a loop near the snake tail.  We could have avoided this
+-- variable by setting game_speed to zero instead, but that will get
+-- overwritten by crank input, so we needed this extra variable.
+local snake_frozen = false
+
 -- Run time stats.
 local snake_score = 0
 local snake_chain = 0
@@ -591,6 +599,7 @@ local function reset()
 	snake_current_chain_length = 0
 
 	snake_frame = 0
+	snake_frozen = false
 	game_time = 0
 
 	-- Start snake head in invisible state.
@@ -917,6 +926,9 @@ end
 
 -- Update snake positions.
 local function update_snake()
+	if snake_frozen then
+		return
+	end
 	snake_frame += game_speed
 	if snake_frame < 64 then
 		return
@@ -1110,12 +1122,6 @@ end
 --    edges.  The behavior here will cause it to follow the edge.
 -- 2. When game has been won, and there is exactly one free spot available,
 --    which is the tail of the snake.
---
--- In most other situations, this function will do the wrong thing because
--- it doesn't do any planning ahead.  The best case is the snake running into
--- itself and cause some graphical glitches, the worst case is the snake
--- running out of bounds and we will try to access a part of grid[][] that
--- isn't populated.
 local function autopilot()
 	-- Only do something if there is an obstacle ahead.
 	if not has_obstacle(snake_x, snake_y) then
@@ -1125,42 +1131,57 @@ local function autopilot()
 	-- Turn counter-clockwise if there is no obstacle there, otherwise
 	-- turn clockwise.
 	if snake_direction == INPUT_RIGHT then
-		snake_x -= 1
-		if not has_obstacle(snake_x, snake_y - 1) then
+		if not has_obstacle(snake_x - 1, snake_y - 1) then
+			snake_x -= 1
 			snake_y -= 1
 			snake_direction = tiles.DIRECTION_RIGHT_UP
-		else
+			return
+		elseif not has_obstacle(snake_x - 1, snake_y + 1) then
+			snake_x -= 1
 			snake_y += 1
 			snake_direction = tiles.DIRECTION_RIGHT_DOWN
+			return
 		end
 	elseif snake_direction == INPUT_LEFT then
-		snake_x += 1
-		if not has_obstacle(snake_x, snake_y + 1) then
+		if not has_obstacle(snake_x + 1, snake_y + 1) then
+			snake_x += 1
 			snake_y += 1
 			snake_direction = tiles.DIRECTION_LEFT_DOWN
-		else
+			return
+		elseif not has_obstacle(snake_x + 1, snake_y - 1) then
+			snake_x += 1
 			snake_y -= 1
 			snake_direction = tiles.DIRECTION_LEFT_UP
+			return
 		end
 	elseif snake_direction == INPUT_UP then
-		snake_y += 1
-		if not has_obstacle(snake_x - 1, snake_y) then
+		if not has_obstacle(snake_x - 1, snake_y + 1) then
 			snake_x -= 1
+			snake_y += 1
 			snake_direction = tiles.DIRECTION_UP_LEFT
-		else
+			return
+		elseif not has_obstacle(snake_x + 1, snake_y + 1) then
 			snake_x += 1
+			snake_y += 1
 			snake_direction = tiles.DIRECTION_UP_RIGHT
+			return
 		end
 	else  -- INPUT_DOWN
-		snake_y -= 1
-		if not has_obstacle(snake_x + 1, snake_y) then
+		if not has_obstacle(snake_x + 1, snake_y - 1) then
 			snake_x += 1
+			snake_y -= 1
 			snake_direction = tiles.DIRECTION_DOWN_RIGHT
-		else
+			return
+		elseif not has_obstacle(snake_x - 1, snake_y - 1) then
 			snake_x -= 1
+			snake_y -= 1
 			snake_direction = tiles.DIRECTION_DOWN_LEFT
+			return
 		end
 	end
+
+	-- No good place to go.
+	snake_frozen = true
 end
 
 -- Setup for GAME_RUNNING state.
@@ -1353,11 +1374,11 @@ local function handle_direction_input(command)
 		return true
 	end
 
-	-- Don't accept direction changes until snake length is at least one.
+	-- Silently drop direction changes until snake length is at least one.
 	-- This avoids instant-death near the beginning while snake is still
 	-- crawling in from beyond the left edge of the screen.
 	if snake_length < 1 then
-		return false
+		return true
 	end
 
 	-- Remaining inputs are intent to turn.  We will make the turn now if we
@@ -1638,10 +1659,10 @@ local function game_running()
 				-- Eating a friendly fruit.
 				grid[snake_y][snake_x] = GRID_FRUIT_EAT_FLAGS | snake_color
 				fruit_eat_timer = START_FRUIT_TIMER
+				fruits_remaining -= 1
 				update_score(snake_color)
 				spawn_fruit()
 
-				fruits_remaining -= 1
 				if fruits_remaining <= 0 then
 					enter_game_won()
 				end
