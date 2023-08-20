@@ -114,8 +114,8 @@ local GRID_DARK_FRUIT_EAT <const> =  GRID_FRUIT_EAT_FLAGS | 2
 
 -- Ring buffer of input commands, a zero-based array.
 --
--- input_write_index is the index of the command that was just recorded,
--- and input_read_index is the index of the command that was just consumed.
+-- input_write_index is the position where next input command would be
+-- recorded, and input_read_index is the next command that will be consumed.
 -- Thus, the two indices being different indicates that there are button
 -- presses available.
 --
@@ -293,7 +293,6 @@ local random_positions_index = GRID_W * GRID_H + 2
 -- all the way to the end.
 local fruit_serial = 0
 local fruit_endgame = false
-local fruits_remaining = 0
 
 -- Timers for animating transitional fruits.
 local START_FRUIT_TIMER <const> = 4
@@ -320,6 +319,58 @@ end
 for i = 10, (GRID_W * GRID_H // 3 + 1) do
 	bonus_table[i] = bonus_table[i - 1]
 end
+
+-- If true, run game in sweeping autopilot mode to ensure that all cells
+-- are visited.  This is used for testing end game conditions, where some
+-- bugs only manifest when the grid is nearly full, and it's tedious to
+-- have to reproduce those conditions by playing perfect games.
+local TEST_AUTOPILOT <const> = false
+
+-- Autopilot test paths.
+local TEST_AUTOPILOT_PATH <const> =
+{
+	-- Maximize turns.
+	{
+		{">", "V", ">", "V", ">", "V", ">", "V", ">", "V", ">", "V"},
+		{"A", ">", "A", ">", "A", ">", "A", ">", "A", ">", "A", "V"},
+		{"A", "<", "V", "<", "<", "<", "V", "<", "<", "<", "V", "<"},
+		{">", "A", ">", "V", ">", "A", ">", "V", ">", "A", ">", "V"},
+		{"A", "<", "V", "<", "A", "<", "V", "<", "A", "<", "V", "<"},
+		{">", "A", ">", "V", ">", "A", ">", "V", ">", "A", ">", "V"},
+		{"A", "<", "<", "<", "A", "<", "<", "<", "A", "<", "<", "<"},
+	},
+	-- Fewer turns.
+	{
+		{">", "V", ">", ">", ">", ">", ">", "V", ">", ">", ">", "V"},
+		{"A", ">", "A", "V", "<", "<", "<", "<", "A", "<", "V", "<"},
+		{"A", "<", "<", ">", ">", ">", ">", ">", ">", "A", ">", "V"},
+		{">", ">", "A", "V", "<", "<", "<", "V", "<", "<", "<", "<"},
+		{"A", "V", "<", "V", ">", "V", "A", ">", ">", ">", ">", "V"},
+		{"A", "V", "A", ">", "A", "V", "A", "V", "<", "V", "<", "V"},
+		{"A", "<", "A", "<", "<", "<", "A", "<", "A", "<", "A", "<"},
+	},
+	-- Mostly horizontal.
+	{
+		{"V", "<", "<", "<", "<", "<", "<", "<", "<", "<", "<", "<"},
+		{">", ">", ">", ">", "V", ">", ">", ">", ">", ">", "V", "A"},
+		{"V", "<", "V", "<", ">", "A", "V", "<", "<", "<", "V", "A"},
+		{"V", "A", "<", "A", "<", "<", "<", ">", "V", "A", "<", "A"},
+		{">", ">", ">", ">", ">", ">", ">", "A", ">", ">", "V", "A"},
+		{"V", "<", "<", "<", "<", "<", "<", "<", "<", "<", "<", "A"},
+		{">", ">", ">", ">", ">", ">", ">", ">", ">", ">", ">", "A"},
+	},
+	-- Mostly vertical.
+	{
+		{"V", "<", "<", "<", "<", "<", "V", "<", "V", "<", "V", "<"},
+		{"V", ">", "V", ">", "V", "A", "V", "A", "V", "A", "<", "A"},
+		{"V", "A", "V", "A", "V", "A", "V", "A", "V", ">", "V", "A"},
+		{"V", "A", "V", "A", "V", "A", "<", "A", "V", "A", "V", "A"},
+		{"V", "A", "V", "A", "V", ">", "V", "A", "<", "A", "V", "A"},
+		{"V", "A", "V", "A", "V", "A", "V", ">", "V", "A", "V", "A"},
+		{">", "A", ">", "A", ">", "A", ">", "A", ">", "A", ">", "A"},
+	},
+}
+local autopilot_selected_path = math.random(1, #TEST_AUTOPILOT_PATH)
 
 --}}}
 
@@ -625,7 +676,6 @@ local function reset()
 	fruit_grow_timer = 0
 	fruit_eat_timer = 0
 	fruit_transition_timer = 0
-	fruits_remaining = 0
 
 	-- Reset status bar.
 	for x = 1, 3 do
@@ -978,366 +1028,12 @@ local function update_snake()
 	end
 end
 
--- Shuffle grid positions.
-local function shuffle_positions()
-	-- https://en.wikipedia.org/wiki/Fisher%E2%80%93Yates_shuffle
-	for i = #random_positions, 2, -1 do
-		local j = math.random(1, i)
-		if i ~= j then
-			random_positions[i], random_positions[j] = random_positions[j], random_positions[i]
-		end
-	end
-
-	random_positions_index = 0
-end
-
--- Return a random position.
-local function get_random_position()
-	if random_positions_index >= #random_positions then
-		shuffle_positions()
-	end
-	random_positions_index += 1
-	return random_positions[random_positions_index][1], random_positions[random_positions_index][2]
-end
-
--- Generate a random fruit location.
---
--- This assumes that there is at least one empty spot available.
-local function generate_fruit_location(next_fruit_color)
-	-- Apply constraints in 3 passes:
-	-- 1. Avoid different color fruits and snake.
-	-- 2. Avoid snake.
-	-- 3. Take any available position.
-	for pass = 1, 3 do
-		for i = 1, #random_positions do
-			local x, y = get_random_position()
-
-			-- Skip spots that are already occupied.
-			if grid[y][x] ~= GRID_EMPTY then
-				goto next_position
-			end
-
-			-- Look for obstacles near this tentative placement spot.
-			local near_different_fruits = false
-			local near_snake = false
-			if pass < 3 then
-				for _, n in ipairs(FRUIT_NEIGHBORS) do
-					local row = grid[y + n[2]]
-					local cell = row and row[x + n[1]]
-					if cell and cell ~= GRID_EMPTY then
-						-- Found a nonempty cell.
-						if cell < GRID_FRUIT_FLAGS then
-							near_snake = true
-						else
-							if (cell & GRID_FRUIT_FLAGS) ~= 0 and (cell & 3) ~= next_fruit_color then
-								near_different_fruits = true
-							end
-						end
-					end
-
-					-- Since head of the snake is not part of the grid, we need
-					-- to manually check the head coordinates here.
-					if x + n[1] == snake_x and y + n[2] == snake_y then
-						near_snake = true
-					end
-				end
-			end
-
-			-- Avoid placing fruits of different colors near each other, since
-			-- they may require quick color transitions to get.
-			if pass == 1 and near_different_fruits then
-				goto next_position
-			end
-
-			-- Avoid placing fruits near the snake.  We especially want to
-			-- avoid popping up new fruits right in front of the player,
-			-- since it may require a quick color change to react.
-			if pass <= 2 and near_snake then
-				goto next_position
-			end
-
-			-- Found a good position that passes the current set of filters.
-			-- If we have to skip some filters to get this far, the grid is
-			-- probably overly crowded, and we need to enable endgame mode.
-			if pass == 3 then
-				fruit_endgame = true
-			end
-
-			-- Return the position we found.
-			do
-				return x, y
-			end
-
-			::next_position::
-		end
-	end
-
-	-- If we got here, it means generate_fruit_location() was called when
-	-- the grid is already completely full, and there are no spots available.
-	return nil, nil
-end
-
--- Spawn a single fruit while game is running.
-local function spawn_fruit()
-	local next_fruit_color = (fruit_serial % 6) // 3 + 1
-	local x, y = generate_fruit_location(next_fruit_color)
-	if not x then
-		return
-	end
-	if not fruit_endgame then
-		fruit_serial += 1
-	end
-
-	-- Add fruit to grid.
-	next_fruit_color |= GRID_FRUIT_GROW_FLAGS
-	grid[y][x] = next_fruit_color
-	fruit_grow_timer = START_FRUIT_TIMER
-	fruits_remaining += 1
-end
-
--- Check if a particular cell contains obstacle or fruit, returns true if so.
--- This is only used by autopilot(), which is only called when there are no
--- fruits left on the grid.
-local function has_obstacle(x, y)
-	if x < 1 or x > GRID_W or y < 1 or y > GRID_H then
-		return true
-	end
-	local cell = grid[y][x]
-	if cell and cell ~= GRID_EMPTY then
-		-- Tail end of the snake doesn't count as an obstacle, because
-		-- visually there is nothing there.
-		local p = (snake_head - snake_length) & SNAKE_BUFFER_MASK
-		if snake[p] and snake[p][1] == x and snake[p][2] == y then
-			return false
-		end
-		return true
-	end
-	return false
-end
-
--- Change snake direction to avoid obstacles.
---
--- Note that this is not a general autopilot, it only works in two scenarios:
--- 1. On title screen, where snake is guaranteed to be crawling along the
---    edges.  The behavior here will cause it to follow the edge.
--- 2. When game has been won, and there is exactly one free spot available,
---    which is the tail of the snake.
-local function autopilot()
-	-- Only do something if there is an obstacle ahead.
-	if not has_obstacle(snake_x, snake_y) then
-		return
-	end
-
-	-- Turn counter-clockwise if there is no obstacle there, otherwise
-	-- turn clockwise.
-	if snake_direction == INPUT_RIGHT then
-		if not has_obstacle(snake_x - 1, snake_y - 1) then
-			snake_x -= 1
-			snake_y -= 1
-			snake_direction = tiles.DIRECTION_RIGHT_UP
-			return
-		elseif not has_obstacle(snake_x - 1, snake_y + 1) then
-			snake_x -= 1
-			snake_y += 1
-			snake_direction = tiles.DIRECTION_RIGHT_DOWN
-			return
-		end
-	elseif snake_direction == INPUT_LEFT then
-		if not has_obstacle(snake_x + 1, snake_y + 1) then
-			snake_x += 1
-			snake_y += 1
-			snake_direction = tiles.DIRECTION_LEFT_DOWN
-			return
-		elseif not has_obstacle(snake_x + 1, snake_y - 1) then
-			snake_x += 1
-			snake_y -= 1
-			snake_direction = tiles.DIRECTION_LEFT_UP
-			return
-		end
-	elseif snake_direction == INPUT_UP then
-		if not has_obstacle(snake_x - 1, snake_y + 1) then
-			snake_x -= 1
-			snake_y += 1
-			snake_direction = tiles.DIRECTION_UP_LEFT
-			return
-		elseif not has_obstacle(snake_x + 1, snake_y + 1) then
-			snake_x += 1
-			snake_y += 1
-			snake_direction = tiles.DIRECTION_UP_RIGHT
-			return
-		end
-	else  -- INPUT_DOWN
-		if not has_obstacle(snake_x + 1, snake_y - 1) then
-			snake_x += 1
-			snake_y -= 1
-			snake_direction = tiles.DIRECTION_DOWN_RIGHT
-			return
-		elseif not has_obstacle(snake_x - 1, snake_y - 1) then
-			snake_x -= 1
-			snake_y -= 1
-			snake_direction = tiles.DIRECTION_DOWN_LEFT
-			return
-		end
-	end
-
-	-- No good place to go.
-	snake_frozen = true
-end
-
--- Setup for GAME_RUNNING state.
-local function enter_running_state()
-	-- Make snake start at center left, going right.
-	reset()
-	snake_x = 1
-	snake_y = 4
-	snake_direction = INPUT_RIGHT
-	game_state = GAME_RUNNING
-	clear_buffered_inputs = true
-
-	-- Spawn initial set of fruits.  This is similar to spawn_fruit(), except
-	-- we avoid the middle 3 rows during startup.
-	--
-	-- Without the middle 3 rows, we have 4*12 = 48 spots available.  Even
-	-- if every fruit uses a 2x2 cell so that it's not adjacent to any other
-	-- fruit, we should be able to guarantee placement for at least 12 fruits.
-	-- Thus, this loop repeats until we got those 12.
-	while fruit_serial <= 12 do
-		local next_fruit_color = (fruit_serial % 6) // 3 + 1
-		local x, y = generate_fruit_location(next_fruit_color)
-		if y and (y < 3 or y > 5) then
-			grid[y][x] = GRID_FRUIT_GROW_FLAGS | next_fruit_color
-			fruit_serial += 1
-			fruits_remaining += 1
-		end
-	end
-
-	-- Generate one last fruit in the middle row, on the way to be consumed
-	-- by snake.
-	local last_fruit_color = (fruit_serial % 6) // 3 + 1
-	fruit_serial += 1
-	fruits_remaining += 1
-	grid[4][GRID_W - 1] = GRID_FRUIT_GROW_FLAGS | last_fruit_color
-
-	-- Set timer to make fruits grow.
-	fruit_grow_timer = START_FRUIT_TIMER
-
-	-- Draw initial score.
-	draw_number(34, snake_score)
-end
-
--- Setup for GAME_OVER state on death.
---
--- Only reachable upon colliding with something.
-local function enter_game_over()
-	-- Save high score if we made an improvement.
-	if snake_score > save_state.hi_score then
-		save_state.hi_score = snake_score
-		playdate.datastore.write(save_state)
-	end
-
-	-- Redraw snake with dead expression.
-	redraw_snake()
-	local d = (TURN_DIRECTION[snake_direction] - 1) // 3 + 1
-	ui_snake_head_sprite:setImage(ui_tile_images:getImage(tiles.dead[snake_color][d]))
-	gfx.sprite.update()
-	coroutine.yield()
-
-	-- Shake the screen for a few frames.
-	--
-	-- Note that we use setDrawOffset for these, as opposed to
-	-- playdate.display.setOffset.  This is because when the snake head
-	-- collides with the edge of the grid, that sprite will be outside of
-	-- the screen area.  If we use setOffset to do the shake, that sprite
-	-- will be truncated.  By using setDrawOffset and redraw, we get to see
-	-- more of the head during the shake.
-	for i = 1, 8 do
-		gfx.setDrawOffset(math.random(-4, 4), math.random(-4, 4))
-		gfx.sprite.update()
-		coroutine.yield()
-	end
-	for i = 1, 4 do
-		gfx.setDrawOffset(math.random(-2, 2), math.random(-2, 2))
-		gfx.sprite.update()
-		coroutine.yield()
-	end
-	gfx.setDrawOffset(0, 0)
-
-	-- Fade in game over text.
-	for i = 1, 32 do
-		adjust_speed()
-		gfx.sprite.update()
-		ui_game_over_image:drawFaded(GAME_OVER_X, GAME_OVER_Y, i / 32, gfx.image.kDitherTypeBayer8x8)
-		coroutine.yield()
-	end
-	ui_game_over_sprite:setVisible(true)
-
-	-- Make high score visible after game over title has faded in.
-	--
-	-- If this were a regular Ikaruga game, this would be the place where
-	-- we show S/A/B/C ranking, but for such a small field I didn't think
-	-- it's worth it.  Anyone interested in those rankings can go play
-	-- the ruby version mentioned at the beginning of this file.
-	draw_high_score()
-
-	-- Update game state to wait for a new button press.
-	game_state = GAME_OVER
-	clear_buffered_inputs = true
-end
-
--- Setup for GAME_OVER state on victory.
---
--- Only reachable when grid is full.
-local function enter_game_won()
-	-- Save high score if we made an improvement.
-	if snake_score > save_state.hi_score then
-		save_state.hi_score = snake_score
-		playdate.datastore.write(save_state)
-	end
-
-	-- Wait for the last fruit to be completely eaten.
-	while fruit_eat_timer > 0 do
-		gfx.sprite.update()
-		coroutine.yield()
-
-		update_snake()
-		draw_snake()
-		draw_fruits()
-		draw_max_chain()
-	end
-	draw_fruits()
-
-	-- Erase chain dots.  This is so that if we end on a max chain, we are
-	-- not obligated to continue blinking.
-	for x = 1, 3 do
-		ui_dots:setTileAtPosition(x, 1, DOT_BLANK)
-	end
-
-	-- Make high score visible.
-	draw_high_score()
-
-	-- Fade in victory text.
-	for i = 1, 32 do
-		adjust_speed()
-		update_snake()
-		draw_snake()
-		autopilot()
-
-		gfx.sprite.update()
-		ui_you_win_image:drawFaded(YOU_WIN_X, YOU_WIN_Y, i / 32, gfx.image.kDitherTypeBayer8x8)
-		coroutine.yield()
-	end
-	ui_you_win_sprite:setVisible(true)
-
-	game_state = GAME_WON
-	clear_buffered_inputs = true
-end
-
 -- Fetch the next buffered input command, or nil if there is none.
 local function get_next_input()
 	if input_read_index == input_write_index then
 		return nil
 	end
-	local command = input_buffer[input_write_index]
+	local command = input_buffer[input_read_index]
 	input_read_index = (input_read_index + 1) & INPUT_BUFFER_MASK
 	return command
 end
@@ -1453,6 +1149,490 @@ local function handle_direction_input(command)
 	-- the next cell in the next frame.
 	snake_frame = 64 - game_speed
 	return false
+end
+
+-- Shuffle grid positions.
+local function shuffle_positions()
+	-- https://en.wikipedia.org/wiki/Fisher%E2%80%93Yates_shuffle
+	for i = #random_positions, 2, -1 do
+		local j = math.random(1, i)
+		if i ~= j then
+			random_positions[i], random_positions[j] = random_positions[j], random_positions[i]
+		end
+	end
+
+	random_positions_index = 0
+end
+
+-- Return a random position.
+local function get_random_position()
+	if random_positions_index >= #random_positions then
+		shuffle_positions()
+	end
+	random_positions_index += 1
+	return random_positions[random_positions_index][1], random_positions[random_positions_index][2]
+end
+
+-- Generate a random fruit location.
+--
+-- This assumes that there is at least one empty spot available.
+local function generate_fruit_location(next_fruit_color)
+	-- Apply constraints in 3 passes:
+	-- 1. Avoid different color fruits and snake.
+	-- 2. Avoid snake.
+	-- 3. Take any available position, but still avoid snake head.
+	local snake_tail_x = -1
+	local snake_tail_y = -1
+	local p = (snake_head - snake_length) & SNAKE_BUFFER_MASK
+	if snake[p] then
+		snake_tail_x = snake[p][1]
+		snake_tail_y = snake[p][2]
+	end
+	for pass = 1, 3 do
+		for i = 1, #random_positions do
+			local x, y = get_random_position()
+
+			-- Skip spots that are already occupied.
+			if grid[y][x] ~= GRID_EMPTY then
+				goto next_position
+			end
+
+			-- Look for obstacles near this tentative placement spot.
+			local near_different_fruits = false
+			local near_snake = false
+			local near_snake_head = false
+			if pass < 3 then
+				for _, n in ipairs(FRUIT_NEIGHBORS) do
+					local row = grid[y + n[2]]
+					local cell = row and row[x + n[1]]
+					if cell and cell ~= GRID_EMPTY then
+						-- Found a nonempty cell.
+						if cell < GRID_FRUIT_FLAGS then
+							near_snake = true
+						else
+							if (cell & GRID_FRUIT_FLAGS) ~= 0 and (cell & 3) ~= next_fruit_color then
+								near_different_fruits = true
+							end
+						end
+					end
+
+					-- Special case to avoid snake head, which isn't part of grid[].
+					if x + n[1] == snake_x and y + n[2] == snake_y then
+						near_snake = true
+						near_snake_head = true
+					end
+				end
+			end
+
+			-- Avoid placing fruits of different colors near each other, since
+			-- they may require quick color transitions to get.
+			if pass == 1 and near_different_fruits then
+				goto next_position
+			end
+
+			-- Avoid placing fruits near the snake.  We especially want to
+			-- avoid popping up new fruits right in front of the player,
+			-- since it may require a quick color change to react.
+			if pass <= 2 and near_snake then
+				goto next_position
+			end
+
+			-- Found a good position that passes the current set of filters.
+			-- If we have to skip some filters to get this far, the grid is
+			-- probably overly crowded, and we need to enable endgame mode.
+			if pass == 3 then
+				fruit_endgame = true
+			end
+
+			-- Always avoid snake head.  We never want to spawn a fruit that
+			-- will be immediately eaten, because that will break accounting.
+			--
+			-- We tend to resort to this last spot immediately in front of the
+			-- snake when the grid is already full, which means fruit_endgame
+			-- is true, which means the fruit is likely friendly (as opposed
+			-- to hostile) and snake will eat it.  Then, another fruit will
+			-- immediately spawn in the same spot (because it's the only one
+			-- available) and snake will eat that one too, so we end up in a
+			-- fast eat loop.  To avoid this situation, grid is considered
+			-- full if the only spot left is in front of the snake.
+			if near_snake_head then
+				goto next_position
+			end
+
+			-- Return the position we found.
+			do
+				return x, y
+			end
+
+			::next_position::
+		end
+	end
+
+	-- If we got here, it means generate_fruit_location() was called when
+	-- the grid is already completely full, and there are no spots available.
+	return nil, nil
+end
+
+-- Spawn a single fruit while game is running.
+--
+-- Returns false if no more fruits has been spawn, and player has won the game.
+local function spawn_fruit()
+	local next_fruit_color = (fruit_serial % 6) // 3 + 1
+	local x, y = generate_fruit_location(next_fruit_color)
+	if not x then
+		-- No more fruit can be spawn.  Check if there are any fruits remaining.
+		for i = 1, GRID_H do
+			for j = 1, GRID_W do
+				local cell = grid[i][j]
+				if cell ~= GRID_EMPTY and (cell & GRID_FRUIT_FLAGS) ~= 0 then
+					return true
+				end
+			end
+		end
+
+		-- Did not find a single uneaten fruit, so player has won the game.
+		--
+		-- Note that we have exhaustively searched the grid for this, even
+		-- though a counter should have sufficed.  We used to keep just a
+		-- counter, but there were some conditions near end game where a
+		-- fruit that is spawn immediately in front of the player at a
+		-- particular frame could cause that accounting to be thrown off.
+		--
+		-- It's difficult to fix because it's difficult to reproduce: I can
+		-- reproduce it about 1 in 4 games, if I managed to play 4 perfect
+		-- games in a row.  I can't reproduce it with the test autopilot
+		-- because it's sensitive to snake_frame timing.  In the end, I
+		-- decided that the surest way to enter endgame is to just do this
+		-- exhaustive check.
+		return false
+	end
+	if not fruit_endgame then
+		fruit_serial += 1
+	end
+
+	-- Add fruit to grid.
+	next_fruit_color |= GRID_FRUIT_GROW_FLAGS
+	grid[y][x] = next_fruit_color
+	fruit_grow_timer = START_FRUIT_TIMER
+	return true
+end
+
+-- Check if a particular cell contains obstacle or fruit, returns true if so.
+-- This is only used by demo_autopilot(), which is only called when there are
+-- no fruits left on the grid.
+local function has_obstacle(x, y)
+	if x < 1 or x > GRID_W or y < 1 or y > GRID_H then
+		return true
+	end
+	local cell = grid[y][x]
+	if cell and cell ~= GRID_EMPTY then
+		-- Tail end of the snake doesn't count as an obstacle, because
+		-- visually there is nothing there.
+		local p = (snake_head - snake_length) & SNAKE_BUFFER_MASK
+		if snake[p] and snake[p][1] == x and snake[p][2] == y then
+			return false
+		end
+		return true
+	end
+	return false
+end
+
+-- Change snake direction to avoid obstacles.
+--
+-- Note that this is not a general autopilot, it only works in two scenarios:
+-- 1. On title screen, where snake is guaranteed to be crawling along the
+--    edges.  The behavior here will cause it to follow the edge.
+-- 2. When game has been won, and there is exactly one free spot available,
+--    which is the tail of the snake.
+local function demo_autopilot()
+	-- Only do something if there is an obstacle ahead.
+	if not has_obstacle(snake_x, snake_y) then
+		return
+	end
+
+	-- Turn counter-clockwise if there is no obstacle there, otherwise
+	-- turn clockwise.
+	if snake_direction == INPUT_RIGHT then
+		if not has_obstacle(snake_x - 1, snake_y - 1) then
+			snake_x -= 1
+			snake_y -= 1
+			snake_direction = tiles.DIRECTION_RIGHT_UP
+			return
+		elseif not has_obstacle(snake_x - 1, snake_y + 1) then
+			snake_x -= 1
+			snake_y += 1
+			snake_direction = tiles.DIRECTION_RIGHT_DOWN
+			return
+		end
+	elseif snake_direction == INPUT_LEFT then
+		if not has_obstacle(snake_x + 1, snake_y + 1) then
+			snake_x += 1
+			snake_y += 1
+			snake_direction = tiles.DIRECTION_LEFT_DOWN
+			return
+		elseif not has_obstacle(snake_x + 1, snake_y - 1) then
+			snake_x += 1
+			snake_y -= 1
+			snake_direction = tiles.DIRECTION_LEFT_UP
+			return
+		end
+	elseif snake_direction == INPUT_UP then
+		if not has_obstacle(snake_x - 1, snake_y + 1) then
+			snake_x -= 1
+			snake_y += 1
+			snake_direction = tiles.DIRECTION_UP_LEFT
+			return
+		elseif not has_obstacle(snake_x + 1, snake_y + 1) then
+			snake_x += 1
+			snake_y += 1
+			snake_direction = tiles.DIRECTION_UP_RIGHT
+			return
+		end
+	else  -- INPUT_DOWN
+		if not has_obstacle(snake_x + 1, snake_y - 1) then
+			snake_x += 1
+			snake_y -= 1
+			snake_direction = tiles.DIRECTION_DOWN_RIGHT
+			return
+		elseif not has_obstacle(snake_x - 1, snake_y - 1) then
+			snake_x -= 1
+			snake_y -= 1
+			snake_direction = tiles.DIRECTION_DOWN_LEFT
+			return
+		end
+	end
+
+	-- No good place to go.
+	snake_frozen = true
+end
+
+-- Check if a particular grid cell contains a hostile fruit, returns true
+-- if so.
+--
+-- This is used by sweeping_autopilot() to determine whether to change
+-- snake color or not.
+local function has_hostile_fruit(x, y)
+	if grid[y] then
+		local cell = grid[y][x]
+		if cell and cell ~= GRID_EMPTY and (cell & GRID_FRUIT_FLAGS) ~= 0 and (cell & 3) ~= snake_color then
+			return true
+		end
+	end
+	return false
+end
+
+-- Sweep through all grid cells automatically, used for testing.
+local function sweeping_autopilot()
+	-- If input buffer already has some commands, assume it was put there
+	-- by the autopilot, and don't generate any more commands until we
+	-- have moved on to the next cell.
+	if input_read_index ~= input_write_index then
+		return
+	end
+
+	-- If we still have time left in the input window, randomly pass on the
+	-- opportunity to generate commands for now.  This is so that autopilot
+	-- commands aren't always aligned to snake_frame overflow boundaries.
+	--
+	-- The multiply by 2 is needed because we might need to enter two
+	-- commands (color change followed by direction change).
+	if snake_frame + game_speed * 2 < INPUT_ACCEPT_WINDOW and math.random(3) > 1 then
+		return
+	end
+
+	-- Generate command based on where we are.  Note that this uses the
+	-- logical head of the snake, which is one behind the preview cell.
+	-- If the logical head doesn't exist because snake has not entered
+	-- the grid yet, wait until next cell.
+	if snake_length <= 0 then
+		return
+	end
+	assert(snake[snake_head])
+	local x = snake[snake_head][1]
+	local y = snake[snake_head][2]
+	local d = TEST_AUTOPILOT_PATH[autopilot_selected_path][y][x]
+	assert(d)
+	if d == ">" then
+		if snake_direction ~= INPUT_RIGHT then
+			unget_next_input(INPUT_RIGHT)
+		end
+		if has_hostile_fruit(x + 1, y) then
+			unget_next_input(INPUT_CHANGE_COLOR)
+		end
+	elseif d == "<" then
+		if snake ~= INPUT_LEFT then
+			unget_next_input(INPUT_LEFT)
+		end
+		if has_hostile_fruit(x - 1, y) then
+			unget_next_input(INPUT_CHANGE_COLOR)
+		end
+	elseif d == "A" then
+		if snake_direction ~= INPUT_UP then
+			unget_next_input(INPUT_UP)
+		end
+		if has_hostile_fruit(x, y - 1) then
+			unget_next_input(INPUT_CHANGE_COLOR)
+		end
+	else  -- "V"
+		if snake_direction ~= INPUT_DOWN then
+			unget_next_input(INPUT_DOWN)
+		end
+		if has_hostile_fruit(x, y + 1) then
+			unget_next_input(INPUT_CHANGE_COLOR)
+		end
+	end
+end
+
+-- Setup for GAME_RUNNING state.
+local function enter_running_state()
+	-- Make snake start at center left, going right.
+	reset()
+	snake_x = 1
+	snake_y = 4
+	snake_direction = INPUT_RIGHT
+	game_state = GAME_RUNNING
+	clear_buffered_inputs = true
+
+	-- Spawn initial set of fruits.  This is similar to spawn_fruit(), except
+	-- we avoid the middle 3 rows during startup.
+	--
+	-- Without the middle 3 rows, we have 4*12 = 48 spots available.  Even
+	-- if every fruit uses a 2x2 cell so that it's not adjacent to any other
+	-- fruit, we should be able to guarantee placement for at least 12 fruits.
+	-- Thus, this loop repeats until we got those 12.
+	while fruit_serial <= 12 do
+		local next_fruit_color = (fruit_serial % 6) // 3 + 1
+		local x, y = generate_fruit_location(next_fruit_color)
+		if y and (y < 3 or y > 5) then
+			grid[y][x] = GRID_FRUIT_GROW_FLAGS | next_fruit_color
+			fruit_serial += 1
+		end
+	end
+
+	-- Generate one last fruit in the middle row, on the way to be consumed
+	-- by snake.
+	local last_fruit_color = (fruit_serial % 6) // 3 + 1
+	fruit_serial += 1
+	grid[4][GRID_W - 1] = GRID_FRUIT_GROW_FLAGS | last_fruit_color
+
+	-- Set timer to make fruits grow.
+	fruit_grow_timer = START_FRUIT_TIMER
+
+	-- Draw initial score.
+	draw_number(34, snake_score)
+
+	-- Use a different autopilot path for each game, if autopilot is enabled.
+	autopilot_selected_path += 1
+	if autopilot_selected_path > #TEST_AUTOPILOT_PATH then
+		autopilot_selected_path = 1
+	end
+end
+
+-- Setup for GAME_OVER state on death.
+--
+-- Only reachable upon colliding with something.
+local function enter_game_over()
+	-- Save high score if we made an improvement.
+	if snake_score > save_state.hi_score then
+		save_state.hi_score = snake_score
+		playdate.datastore.write(save_state)
+	end
+
+	-- Redraw snake with dead expression.
+	redraw_snake()
+	local d = (TURN_DIRECTION[snake_direction] - 1) // 3 + 1
+	ui_snake_head_sprite:setImage(ui_tile_images:getImage(tiles.dead[snake_color][d]))
+	gfx.sprite.update()
+	coroutine.yield()
+
+	-- Shake the screen for a few frames.
+	--
+	-- Note that we use setDrawOffset for these, as opposed to
+	-- playdate.display.setOffset.  This is because when the snake head
+	-- collides with the edge of the grid, that sprite will be outside of
+	-- the screen area.  If we use setOffset to do the shake, that sprite
+	-- will be truncated.  By using setDrawOffset and redraw, we get to see
+	-- more of the head during the shake.
+	for i = 1, 8 do
+		gfx.setDrawOffset(math.random(-4, 4), math.random(-4, 4))
+		gfx.sprite.update()
+		coroutine.yield()
+	end
+	for i = 1, 4 do
+		gfx.setDrawOffset(math.random(-2, 2), math.random(-2, 2))
+		gfx.sprite.update()
+		coroutine.yield()
+	end
+	gfx.setDrawOffset(0, 0)
+
+	-- Fade in game over text.
+	for i = 1, 32 do
+		adjust_speed()
+		gfx.sprite.update()
+		ui_game_over_image:drawFaded(GAME_OVER_X, GAME_OVER_Y, i / 32, gfx.image.kDitherTypeBayer8x8)
+		coroutine.yield()
+	end
+	ui_game_over_sprite:setVisible(true)
+
+	-- Make high score visible after game over title has faded in.
+	--
+	-- If this were a regular Ikaruga game, this would be the place where
+	-- we show S/A/B/C ranking, but for such a small field I didn't think
+	-- it's worth it.  Anyone interested in those rankings can go play
+	-- the ruby version mentioned at the beginning of this file.
+	draw_high_score()
+
+	-- Update game state to wait for a new button press.
+	game_state = GAME_OVER
+	clear_buffered_inputs = true
+end
+
+-- Setup for GAME_OVER state on victory.
+--
+-- Only reachable when grid is full.
+local function enter_game_won()
+	-- Save high score if we made an improvement.
+	if snake_score > save_state.hi_score then
+		save_state.hi_score = snake_score
+		playdate.datastore.write(save_state)
+	end
+
+	-- Wait for the last fruit to be completely eaten.
+	while fruit_eat_timer > 0 do
+		gfx.sprite.update()
+		coroutine.yield()
+
+		update_snake()
+		draw_snake()
+		draw_fruits()
+		draw_max_chain()
+	end
+	draw_fruits()
+
+	-- Erase chain dots.  This is so that if we end on a max chain, we are
+	-- not obligated to continue blinking.
+	for x = 1, 3 do
+		ui_dots:setTileAtPosition(x, 1, DOT_BLANK)
+	end
+
+	-- Make high score visible.
+	draw_high_score()
+
+	-- Fade in victory text.
+	for i = 1, 32 do
+		adjust_speed()
+		update_snake()
+		draw_snake()
+		demo_autopilot()
+
+		gfx.sprite.update()
+		ui_you_win_image:drawFaded(YOU_WIN_X, YOU_WIN_Y, i / 32, gfx.image.kDitherTypeBayer8x8)
+		coroutine.yield()
+	end
+	ui_you_win_sprite:setVisible(true)
+
+	game_state = GAME_WON
+	clear_buffered_inputs = true
 end
 
 -- Advance snake animation while ignoring input until it's one frame before
@@ -1598,6 +1778,7 @@ local function update_title_menu_image()
 		gfx.drawText("*Change speed*", 4, 124)
 		gfx.drawText("Crank", 4, 146)
 
+		gfx.drawText("Ikaruga Snake v" .. playdate.metadata.version, 4, 198)
 		gfx.drawText("omoikane@uguu.org", 4, 220)
 		gfx.popContext()
 	end
@@ -1617,6 +1798,11 @@ local function game_running()
 	draw_snake()
 	draw_fruits()
 	draw_max_chain()
+
+	-- Populate input buffer for testing.
+	if TEST_AUTOPILOT then
+		sweeping_autopilot()
+	end
 
 	-- Get the next buffered command.
 	local command = get_next_input()
@@ -1659,11 +1845,8 @@ local function game_running()
 				-- Eating a friendly fruit.
 				grid[snake_y][snake_x] = GRID_FRUIT_EAT_FLAGS | snake_color
 				fruit_eat_timer = START_FRUIT_TIMER
-				fruits_remaining -= 1
 				update_score(snake_color)
-				spawn_fruit()
-
-				if fruits_remaining <= 0 then
+				if not spawn_fruit() then
 					enter_game_won()
 				end
 			else
@@ -1728,7 +1911,7 @@ local function game_title()
 		draw_snake()
 
 		-- Turn around at corners.
-		autopilot()
+		demo_autopilot()
 		return
 	end
 
@@ -1770,7 +1953,7 @@ local function game_won()
 	-- Animate snake.
 	update_snake()
 	draw_snake()
-	autopilot()
+	demo_autopilot()
 end
 
 -- Game loop for game over screen.
@@ -1826,33 +2009,33 @@ function playdate.update()
 end
 
 function playdate.leftButtonDown()
-	input_write_index = (input_write_index + 1) & INPUT_BUFFER_MASK
 	input_buffer[input_write_index] = INPUT_LEFT
+	input_write_index = (input_write_index + 1) & INPUT_BUFFER_MASK
 end
 
 function playdate.rightButtonDown()
-	input_write_index = (input_write_index + 1) & INPUT_BUFFER_MASK
 	input_buffer[input_write_index] = INPUT_RIGHT
+	input_write_index = (input_write_index + 1) & INPUT_BUFFER_MASK
 end
 
 function playdate.upButtonDown()
-	input_write_index = (input_write_index + 1) & INPUT_BUFFER_MASK
 	input_buffer[input_write_index] = INPUT_UP
+	input_write_index = (input_write_index + 1) & INPUT_BUFFER_MASK
 end
 
 function playdate.downButtonDown()
-	input_write_index = (input_write_index + 1) & INPUT_BUFFER_MASK
 	input_buffer[input_write_index] = INPUT_DOWN
+	input_write_index = (input_write_index + 1) & INPUT_BUFFER_MASK
 end
 
 function playdate.AButtonDown()
-	input_write_index = (input_write_index + 1) & INPUT_BUFFER_MASK
 	input_buffer[input_write_index] = INPUT_CHANGE_COLOR
+	input_write_index = (input_write_index + 1) & INPUT_BUFFER_MASK
 end
 
 function playdate.BButtonDown()
-	input_write_index = (input_write_index + 1) & INPUT_BUFFER_MASK
 	input_buffer[input_write_index] = INPUT_CHANGE_COLOR
+	input_write_index = (input_write_index + 1) & INPUT_BUFFER_MASK
 end
 
 function playdate.crankDocked()
