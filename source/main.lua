@@ -30,14 +30,15 @@ Given the graphical constraints, the 400x240 screen is laid out as follows:
    (  0, 236)   Bottom border     400 by 4
    (254,   0)   Speed indicator   76 by 12
 
-Grid size limits maximum number of fruits that can be eaten, thus maximum
-number of chains is 12*7/3 = 28.  If eating one fruit is 10 points and
-maximum chain bonus is capped at 25600, maximum possible score would be:
+Grid size limits maximum number of fruits that can be eaten.  Snake body
+starts at length 4 (3 plus head), thus the maximum number of chains
+possible is (12 * 7 - 4) // 3 = 26.  Eating one fruit is 10 points and
+maximum chain bonus is capped at 25600, so maximum possible score is:
 
    100 + 200 + 400 + 800 + 1600 + 3200 + 6400 + 12800 + 25600 +
-   25600 * 19 +
-   10 * 12*7
-   = 538340
+   25600 * (26 - 9) +
+   10 * (12 * 7 - 4)
+   = 487100
 
 This means we only need to reserve so few of the 34 characters:
 
@@ -48,6 +49,11 @@ This means we only need to reserve so few of the 34 characters:
 So we got 90 pixels free available to between high score and current score,
 and we use 76 of that for the speed indicator (16x12 sprite, in 60 possible
 positions).
+
+Achieving the maximum score is something of a puzzle even when the game is
+running at snail speed, I encourage everyone give it a try.
+
+https://photos.app.goo.gl/R7mGBKnQ3VkpNHR26
 
 --]]
 
@@ -1294,16 +1300,21 @@ local function spawn_fruit()
 		--
 		-- Note that we have exhaustively searched the grid for this, even
 		-- though a counter should have sufficed.  We used to keep just a
-		-- counter, but there were some conditions near end game where a
-		-- fruit that is spawn immediately in front of the player at a
-		-- particular frame could cause that accounting to be thrown off.
+		-- counter, but near endgame it doesn't always work.  This is because
+		-- the grid is very crowded around endgame so fruits can spawn near
+		-- the snake where it could be immediately eaten, but before snake
+		-- collides with the fruit, the grid cell might have already been
+		-- overwritten by the snake body.  Previously, we would have incremented
+		-- the remaining fruit count in that case, even though the fruit has
+		-- already disappeared without being eaten, so now the remaining
+		-- fruit count can not reach zero.  By exhaustively checking for
+		-- available fruits on the grid to trigger GAME_WON state, we are
+		-- immune from fruit count discrepancies.
 		--
-		-- It's difficult to fix because it's difficult to reproduce: I can
-		-- reproduce it about 1 in 4 games, if I managed to play 4 perfect
-		-- games in a row.  I can't reproduce it with the test autopilot
-		-- because it's sensitive to snake_frame timing.  In the end, I
-		-- decided that the surest way to enter endgame is to just do this
-		-- exhaustive check.
+		-- Note that fruit_serial does not become out of sync even though a
+		-- spawned fruit might not be eaten, because for fruits to spawn near
+		-- player, fruit_endgame must already be true, and at that point
+		-- fruit_serial is no longer incrementing.
 		return false
 	end
 	if not fruit_endgame then
@@ -1340,10 +1351,17 @@ end
 -- Change snake direction to avoid obstacles.
 --
 -- Note that this is not a general autopilot, it only works in two scenarios:
+--
 -- 1. On title screen, where snake is guaranteed to be crawling along the
 --    edges.  The behavior here will cause it to follow the edge.
+--
 -- 2. When game has been won, and there is exactly one free spot available,
 --    which is the tail of the snake.
+--
+--    Autopilot doesn't always work in this case either because the tail of
+--    the snake might not be an adjacent cell if player did not form a loop
+--    by the end of game, in which case would pause snake movements to avoid
+--    corrupting the grid.
 local function demo_autopilot()
 	-- Only do something if there is an obstacle ahead.
 	if not has_obstacle(snake_x, snake_y) then
@@ -1975,6 +1993,10 @@ playdate.getSystemMenu():addMenuItem("reset hi score", function()
 end)
 
 function playdate.update()
+	-- Drop any pending button presses across state transitions.  Usually
+	-- there is no more than one.  Note that we need to return from
+	-- playdate.update() for the button callbacks to work, as opposed to
+	-- coroutine.yield().
 	if clear_buffered_inputs then
 		if input_read_index == input_write_index then
 			clear_buffered_inputs = false
