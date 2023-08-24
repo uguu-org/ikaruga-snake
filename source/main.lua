@@ -31,14 +31,14 @@ Given the graphical constraints, the 400x240 screen is laid out as follows:
    (254,   0)   Speed indicator   76 by 12
 
 Grid size limits maximum number of fruits that can be eaten.  Snake body
-starts at length 4 (3 plus head), thus the maximum number of chains
-possible is (12 * 7 - 4) // 3 = 26.  Eating one fruit is 10 points and
+starts at length 3 (2 plus head), thus the maximum number of chains
+possible is (12 * 7 - 3) / 3 = 27.  Eating one fruit is 10 points and
 maximum chain bonus is capped at 25600, so maximum possible score is:
 
    100 + 200 + 400 + 800 + 1600 + 3200 + 6400 + 12800 + 25600 +
-   25600 * (26 - 9) +
-   10 * (12 * 7 - 4)
-   = 487100
+   25600 * (27 - 9) +
+   10 * (12 * 7 - 3)
+   = 512710
 
 This means we only need to reserve so few of the 34 characters:
 
@@ -643,10 +643,17 @@ local function reset()
 	--
 	-- Initial position and direction will be set by game_init() and
 	-- game_title().
+	--
+	-- Note that snake_target_length is configured to start at the minimum
+	-- snake length, which is 3 (2 plus head).  It might seem like the minimum
+	-- length should be 4 due to two head tiles plus two tail tiles, but 3
+	-- works because the back of the head and front of tail can share the
+	-- same tile.  Reducing the initial snake length allows one extra fruit
+	-- to be eaten.
 	snake = {}
 	snake_head = 0
 	snake_length = 0
-	snake_target_length = 3
+	snake_target_length = 2
 	snake_color = tiles.COLOR_LIGHT
 
 	snake_score = 0
